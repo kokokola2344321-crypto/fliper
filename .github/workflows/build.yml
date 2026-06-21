@@ -3,8 +3,6 @@ name: Build FlipperDroid APK
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
@@ -12,53 +10,86 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Install dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git curl unzip zip openjdk-17-jdk gradle 2>&1 | tail -5
+          java -version 2>&1
+          gradle --version 2>&1 | head -3
+
       - name: Checkout code
-        uses: actions/checkout@v4.2.2
+        shell: bash
+        run: |
+          export GIT_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          git clone https://oauth2:${GIT_TOKEN}@github.com/${{ github.repository }}.git .
+          git checkout ${{ github.sha }}
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4.7.1
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Install Android SDK manually
+      - name: Setup Android SDK
         shell: bash
         run: |
           mkdir -p $HOME/android-sdk/cmdline-tools
           cd $HOME/android-sdk/cmdline-tools
-          curl -sL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q cmdline-tools.zip
-          rm cmdline-tools.zip
-          mv cmdline-tools latest 2>/dev/null || true
-          export PATH=$HOME/android-sdk/cmdline-tools/latest/bin:$PATH
+          curl -sL -o tools.zip "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          unzip -q tools.zip
+          rm tools.zip
           
+          # Find extracted directory
+          if [ -d "cmdline-tools" ]; then
+            mv cmdline-tools latest
+          elif ls *.bat *.sh 1>/dev/null 2>&1; then
+            mkdir -p latest
+            mv * latest/ 2>/dev/null || true
+          fi
+          
+          export PATH="$HOME/android-sdk/cmdline-tools/latest/bin:$PATH"
+          
+          # Accept licenses
           yes | sdkmanager --licenses 2>&1 || true
+          
+          # Install required
           yes | sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1" 2>&1
           
           echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
           echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
 
-      - name: Create local.properties
+      - name: Setup local.properties
+        shell: bash
         run: |
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "ndk.dir=$ANDROID_HOME/ndk/27.0.12077973" >> local.properties
-
-      - name: Setup Gradle wrapper
-        run: |
-          gradle wrapper --gradle-version 8.11.1 2>&1 || true
-          chmod +x gradlew
+          cat local.properties
 
       - name: Build APK
+        shell: bash
         run: |
-          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 || ./gradlew assembleDebug --no-daemon --stacktrace --no-build-cache 2>&1
-          echo "=== Looking for APK ==="
-          find . -path "*/outputs/apk/*" -name "*.apk" 2>/dev/null
-          ls -la app/build/outputs/apk/debug/ 2>/dev/null || echo "No debug APK dir"
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --no-daemon --stacktrace 2>&1
+          else
+            gradle wrapper --gradle-version 8.11.1
+            chmod +x gradlew
+            ./gradlew assembleDebug --no-daemon --stacktrace 2>&1
+          fi
+          echo "=== RESULT ==="
+          find . -name "*.apk" -type f 2>/dev/null
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4.6.2
-        with:
-          name: FlipperDroid-APK
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: warn
+      - name: Upload APK via GitHub CLI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(find . -name "*.apk" -type f 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "No APK found!"
+            exit 1
+          fi
+          echo "Uploading: $APK"
+          gh release upload v1.0.0 "$APK" --repo ${{ github.repository }} --clobber 2>&1 || \
+          gh run upload "$APK" --repo ${{ github.repository }} 2>&1 || true
+          
+          # Alternative: use temporary file storage
+          cp "$APK" /tmp/FlipperDroid.apk
+          echo "APK saved to /tmp/FlipperDroid.apk"
+          echo "APK_NAME=FlipperDroid.apk" >> $GITHUB_ENV
